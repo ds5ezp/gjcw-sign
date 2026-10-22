@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ko" style="background:#000">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>전광판</title>
+  <!--
+    LED 전광판 표시 페이지 (ViPlex '웹 페이지' 위젯에 등록)
+      1층 현관   : 이 주소?screen=lobby&key=접속키   (1152×160)
+      3층 대강당 : 이 주소?screen=hall&key=접속키    (2304×256)
+    접속 키와 완성된 주소는 업무포털 '전광판 관리 > 화면·주소' 탭에 나옴
+    콘텐츠는 업무포털에서 관리하고, 이 페이지는 20초마다 '전광판 API' 에서 목록을 받아 바뀐 것만 반영함
+
+    플레이어 브라우저(안드로이드 WebView)를 위해 예전 문법(var, function)만 쓰고 외부 파일·글꼴을 쓰지 않음
+    &fit=0 을 붙이면 창 크기와 상관없이 해상도 그대로 그림 (기본: 창 크기가 해상도와 다를 때만 꽉 맞춤)
+  -->
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+    body { -webkit-user-select: none; user-select: none; cursor: none; }
+    ::-webkit-scrollbar { display: none; width: 0; height: 0; }
+    #stage { position: absolute; left: 0; top: 0; overflow: hidden; background: #000; -webkit-transform-origin: 0 0; transform-origin: 0 0; }
+    .layer { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; background: #000; visibility: hidden; }
+    .layer.on { visibility: visible; }
+    .layer img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+    .fixed { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: -webkit-box; display: -webkit-flex; display: flex;
+      -webkit-box-align: center; -webkit-align-items: center; align-items: center;
+      -webkit-box-pack: center; -webkit-justify-content: center; justify-content: center; text-align: center; }
+    .fixed span { white-space: pre; line-height: 1.15; }
+    .run { position: absolute; left: 0; top: 0; white-space: nowrap; }
+    .fixed, .run { font-family: sans-serif; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div id="stage"><div class="layer" id="layerA"></div><div class="layer" id="layerB"></div></div>
+  <script>
+  (function () {
+    'use strict';
+
+    // '전광판 API' 프로젝트의 웹 앱 주소 (배포 후 나오는 주소로 바꿔 주세요)
+    var API_URL = 'https://script.google.com/macros/s/여기에_전광판_API_배포_ID/exec';
+    // 서버 응답이 오기 전에 쓰는 기본 해상도 (실제 값은 시트 '화면' 탭)
+    var SIZES = { lobby: [1152, 160], hall: [2304, 256] };
+    var POLL_MS = 20000;               // 목록 확인 간격
+    var FIRST_RETRY_MS = 5000;         // 처음 목록을 못 받았을 때 다시 묻는 간격
+    var RELOAD_MS = 4 * 60 * 60 * 1000; // 이 시간마다 조용히 페이지 새로고침 (메모리 정리)
+    var REQUEST_TIMEOUT = 15000;
+    var IMAGE_RETRY_MS = 30000;
+
+    // 어떤 오류가 나도 오류 화면을 띄우지 않음
+    window.onerror = function () { return true; };
+
+    function param(name) {
+      var m = new RegExp('[?&]' + name + '=([^&#]*)').exec(location.search);
+      return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : '';
+    }
+
+    var code = param('screen');
+    var key = param('key');
+    var fit = param('fit') !== '0';
+
+    var stage = document.getElementById('stage');
+    var layers = [document.getElementById('layerA'), document.getElementById('layerB')];
+    var front = 0;
+    var W = 0, H = 0;
+    var items = [];          // 서버에서 받은 이 화면 콘텐츠 (순서대로)
+    var lastText = '';       // 바뀌었는지 비교용
+    var offset = 0;          // 서버 시각 - 이 기기 시각 (기기 시계가 틀려도 기간을 맞게 판단)
+    var lastOk = 0;          // 마지막으로 서버와 통신이 된 시각
+    var pageStart = clock();
+    var images = {};         // 파일ID → { state: new|loading|ready|fail, img, failedAt }
+    var current = null;      // 지금 보여주는 콘텐츠
+    var timer = null;
+    var pollTimer = null;
+    var anim = null;
+    var reloading = false;
+
+    var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
+      function (cb) { return setTimeout(cb, 16); };
+    var caf = window.cancelAnimationFrame || window.webkitCancelAnimationFrame || clearTimeout;
+
+    function clock() { return new Date().getTime(); }
+    function now() { return clock() + offset; }
+
+    function clear(node) {
+      while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    function setTransform(node, value) {
+      node.style.webkitTransform = value;
+      node.style.transform = value;
+    }
+
+    // ---------- 화면 크기 ----------
+    function setSize(w, h) {
+      w = Number(w) || 0;
+      h = Number(h) || 0;
+      if (!w || !h || (w === W && h === H)) return;
+      W = w;
+      H = h;
+      stage.style.width = W + 'px';
+      stage.style.height = H + 'px';
+      scaleStage();
+    }
+
+    // 기기 배율 때문에 페이지 크기가 해상도와 다르게 잡힐 때만 늘이거나 줄여 꽉 맞춤
+    function scaleStage() {
+      if (!W || !H) return;
+      var vw = window.innerWidth, vh = window.innerHeight;
+      var value = '';
+      if (fit && vw && vh && (Math.abs(vw - W) > 1 || Math.abs(vh - H) > 1)) {
+        value = 'scale(' + (vw / W) + ',' + (vh / H) + ')';
+      }
+      setTransform(stage, value);
+    }
+    window.onresize = scaleStage;
+
+    // ---------- 서버 요청 ----------
+    function request(query, ok, bad) {
+      var done = false;
+      var xhr = new XMLHttpRequest();
+      function fail() {
+        if (done) return;
+        done = true;
+        try { xhr.abort(); } catch (e) { /* 이미 끝남 */ }
+        if (bad) bad();
+      }
+      var guard = setTimeout(fail, REQUEST_TIMEOUT + 2000);
+      try {
+        xhr.open('GET', API_URL + '?' + query + '&screen=' + encodeURIComponent(code) +
+          '&key=' + encodeURIComponent(key) + '&_=' + clock(), true);
+        xhr.timeout = REQUEST_TIMEOUT;
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState !== 4 || done) return;
+          clearTimeout(guard);
+          var body = null;
+          if (xhr.status === 200) {
+            try { body = JSON.parse(xhr.responseText); } catch (e) { body = null; }
+          }
+          if (!body) return fail();
+          done = true;
+          ok(body);
+        };
+        xhr.ontimeout = fail;
+        xhr.onerror = fail;
+        xhr.send();
+      } catch (e) {
+        clearTimeout(guard);
+        fail();
+      }
+    }
+
+    function schedulePoll(ms) {
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(poll, ms);
+    }
+
+    function poll() {
+      request('fn=list', function (body) {
+        lastOk = clock();
+        schedulePoll(POLL_MS);
+        // 서버가 시트를 잠시 못 읽은 경우: 지금 내용 그대로 유지
+        if (body.error) return;
+        // 키가 틀리면 검은 화면
+        if (!body.ok) {
+          items = [];
+          lastText = '';
+          images = {};
+          current = null;
+          showNothing();
+          return;
+        }
+        if (body.now) offset = Number(body.now) - clock();
+        setSize(body.w, body.h);
+        var text = JSON.stringify(body.items || []);
+        if (text !== lastText) {
+          lastText = text;
+          items = body.items || [];
+          loadImages();
+          // 지금 보이는 콘텐츠가 지워졌거나 바뀌었으면 바로 다음으로
+          if (current && !findSame(current)) next();
+        } else {
+          loadImages();
+        }
+        if (!current && timer === null) next();
+      }, function () {
+        // 네트워크 오류: 지금 내용 그대로 두고 다시 확인
+        schedulePoll(lastOk ? POLL_MS : FIRST_RETRY_MS);
+      });
+    }
+
+    function findSame(it) {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].id === it.id && items[i].v === it.v) return items[i];
+      }
+      return null;
+    }
+
+    // ---------- 이미지 미리 받기 ----------
+    function loadImages() {
+      var need = {};
+      var f;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type === 'image' && items[i].file) need[items[i].file] = true;
+      }
+      // 더 이상 쓰지 않는 이미지는 버림 (지금 보이는 것은 남김)
+      for (f in images) {
+        if (images.hasOwnProperty(f) && !need[f] && !(current && current.file === f)) delete images[f];
+      }
+      for (f in need) {
+        if (!need.hasOwnProperty(f)) continue;
+        if (!images[f]) images[f] = { state: 'new' };
+        var entry = images[f];
+        if (entry.state === 'new' || (entry.state === 'fail' && clock() - entry.failedAt > IMAGE_RETRY_MS)) fetchImage(f);
+      }
+    }
+
+    function fetchImage(fileId) {
+      var entry = images[fileId];
+      entry.state = 'loading';
+      function failed() {
+        entry.state = 'fail';
+        entry.failedAt = clock();
+      }
+      request('fn=image&id=' + encodeURIComponent(fileId), function (body) {
+        if (images[fileId] !== entry) return;
+        if (!body.ok || !body.data) return failed();
+        var img = new Image();
+        img.onload = function () {
+          if (images[fileId] !== entry) return;
+          entry.img = img;
+          entry.state = 'ready';
+          if (!current) next();
+        };
+        img.onerror = failed;
+        img.src = body.data;
+      }, failed);
+    }
+
+    // ---------- 순환 표시 ----------
+    function validItems() {
+      var t = now();
+      var out = [];
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (it.start && t < it.start) continue;
+        if (it.end && t >= it.end) continue;
+        if (it.type === 'image' && !(images[it.file] && images[it.file].state === 'ready')) continue;
+        out.push(it);
+      }
+      return out;
+    }
+
+    function next() {
+      clearTimeout(timer);
+      timer = null;
+      checkReload();
+      var list = validItems();
+      if (!list.length) {
+        // 보여줄 것이 없으면 검은 화면으로 두고 1초마다 다시 확인 (시작 시각이 된 콘텐츠 등)
+        current = null;
+        showNothing();
+        timer = setTimeout(next, 1000);
+        return;
+      }
+      var idx = 0;
+      if (current) {
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].id === current.id) { idx = (i + 1) % list.length; break; }
+        }
+      }
+      var it = list[idx];
+      // 하나만 남았으면 다시 그리지 않음 (깜빡임 방지). 흐르는 자막은 처음부터 다시 흐름
+      if (current && it.id === current.id && it.v === current.v && !(it.type === 'text' && it.scroll)) {
+        current = it;
+        timer = setTimeout(next, Math.max(1, it.sec) * 1000);
+        return;
+      }
+      show(it);
+    }
+
+    // 뒤쪽 화면에 다 그린 다음 한 번에 바꿈 (이미지는 미리 받아 둔 것만 씀)
+    function show(it) {
+      stopAnim();
+      var back = layers[1 - front];
+      clear(back);
+      var ms = Math.max(1, it.sec) * 1000;
+      if (it.type === 'image') {
+        back.style.background = '#000';
+        back.appendChild(images[it.file].img);
+      } else {
+        back.style.background = it.bg || '#000';
+        var fontPx = Math.max(8, Math.round(H * (it.size || 60) / 100));
+        if (it.scroll) {
+          var run = document.createElement('div');
+          run.className = 'run';
+          run.style.color = it.color || '#fff';
+          run.style.fontSize = fontPx + 'px';
+          run.style.height = H + 'px';
+          run.style.lineHeight = H + 'px';
+          run.textContent = String(it.text).replace(/\s*\n\s*/g, '   ');
+          setTransform(run, 'translate3d(' + W + 'px,0,0)');
+          back.appendChild(run);
+          var textW = run.offsetWidth;
+          // 1초에 화면 높이의 1.2배만큼 이동, 표시 시간 동안 끝까지 흘러가는 횟수만큼 반복
+          var speed = Math.max(60, H * 1.2);
+          var pass = (W + textW) / speed * 1000;
+          ms = pass * Math.max(1, Math.round(ms / pass));
+          startAnim(run, textW, pass);
+        } else {
+          var box = document.createElement('div');
+          box.className = 'fixed';
+          var span = document.createElement('span');
+          span.style.color = it.color || '#fff';
+          span.style.fontSize = fontPx + 'px';
+          span.textContent = String(it.text);
+          box.appendChild(span);
+          back.appendChild(box);
+          // 화면보다 길면 글자를 줄여 다 보이게
+          var scale = Math.min(1, (W * 0.96) / (span.offsetWidth || 1), (H * 0.98) / (span.offsetHeight || 1));
+          if (scale < 1) span.style.fontSize = Math.max(8, Math.floor(fontPx * scale)) + 'px';
+        }
+      }
+      back.className = 'layer on';
+      var old = layers[front];
+      old.className = 'layer';
+      if (old !== back) clear(old);
+      front = 1 - front;
+      current = it;
+      timer = setTimeout(next, ms);
+    }
+
+    function showNothing() {
+      stopAnim();
+      layers[0].className = 'layer';
+      layers[1].className = 'layer';
+      clear(layers[0]);
+      clear(layers[1]);
+    }
+
+    function startAnim(node, textW, pass) {
+      var t0 = clock();
+      function step() {
+        var p = ((clock() - t0) % pass) / pass;
+        setTransform(node, 'translate3d(' + Math.round(W - p * (W + textW)) + 'px,0,0)');
+        anim = raf(step);
+      }
+      step();
+    }
+
+    function stopAnim() {
+      if (anim !== null) {
+        caf(anim);
+        anim = null;
+      }
+    }
+
+    // ---------- 조용한 새로고침 ----------
+    // 서버와 통신이 잘 되고, 이 페이지를 다시 받을 수 있을 때만 새로고침 (안 되면 10분 뒤 다시 시도)
+    function checkReload() {
+      if (reloading || clock() - pageStart < RELOAD_MS || clock() - lastOk > POLL_MS * 2 + 10000) return;
+      reloading = true;
+      var xhr = new XMLHttpRequest();
+      function later() {
+        reloading = false;
+        pageStart = clock() - RELOAD_MS + 10 * 60 * 1000;
+      }
+      try {
+        xhr.open('GET', location.href.split('#')[0] + (location.search ? '&' : '?') + 'check=' + clock(), true);
+        xhr.timeout = REQUEST_TIMEOUT;
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState !== 4) return;
+          if (xhr.status === 200 && xhr.responseText.indexOf('id="stage"') !== -1) location.reload();
+          else later();
+        };
+        xhr.ontimeout = later;
+        xhr.onerror = later;
+        xhr.send();
+      } catch (e) {
+        later();
+      }
+    }
+
+    // ---------- 시작 ----------
+    if (SIZES[code]) setSize(SIZES[code][0], SIZES[code][1]);
+    else setSize(window.innerWidth || 1152, window.innerHeight || 160);
+    // 화면 이름이나 키가 없으면 검은 화면으로 둠
+    if (code && key) poll();
+  })();
+  </script>
+</body>
+</html>
