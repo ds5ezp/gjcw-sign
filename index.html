@@ -321,6 +321,8 @@
           // 화면보다 길면 글자를 줄여 다 보이게
           var scale = Math.min(1, (W * 0.96) / (span.offsetWidth || 1), (H * 0.98) / (span.offsetHeight || 1));
           if (scale < 1) span.style.fontSize = Math.max(8, Math.floor(fontPx * scale)) + 'px';
+          // 움직이는 효과 (고정 글자에만 적용)
+          if (FX[it.effect]) startFx(span, it.effect, String(it.text));
         }
       }
       back.className = 'layer on';
@@ -330,6 +332,27 @@
       front = 1 - front;
       current = it;
       timer = setTimeout(next, ms);
+    }
+
+    // ---------- 움직이는 효과 ----------
+    // blink 깜빡임 / pulse 확대·축소 / type 글자 타자 / rainbow 무지개 색
+    var FX = { blink: 1, pulse: 1, type: 1, rainbow: 1 };
+    function startFx(node, effect, text) {
+      var t0 = clock();
+      function frame() {
+        var t = clock() - t0;
+        if (effect === 'blink') {
+          node.style.visibility = Math.floor(t / 500) % 2 ? 'hidden' : 'visible';
+        } else if (effect === 'pulse') {
+          setTransform(node, 'scale(' + (1 + 0.08 * Math.sin(t / 400 * Math.PI)) + ')');
+        } else if (effect === 'type') {
+          node.textContent = text.slice(0, Math.min(text.length, Math.floor(t / 120) + 1));
+        } else if (effect === 'rainbow') {
+          node.style.color = 'hsl(' + ((t / 15) % 360) + ', 100%, 60%)';
+        }
+        anim = raf(frame);
+      }
+      frame();
     }
 
     function showNothing() {
