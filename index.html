@@ -297,7 +297,20 @@
         back.style.background = '#000';
         back.appendChild(images[it.file].img);
       } else {
-        back.style.background = it.bg || '#000';
+        setBg(back, it);
+        // 문구 뒤 띠: 위아래가 흐려지는 줄무늬 (글자보다 먼저 깔아서 뒤에 보이게)
+        if (it.band) {
+          var band = document.createElement('div');
+          band.style.position = 'absolute';
+          band.style.left = '0';
+          band.style.right = '0';
+          band.style.top = '20%';
+          band.style.height = '60%';
+          var bandColor = it.grad2 || '#1e3a8a';
+          band.style.background = '-webkit-linear-gradient(top, rgba(0,0,0,0), ' + bandColor + ' 50%, rgba(0,0,0,0))';
+          band.style.background = 'linear-gradient(to bottom, rgba(0,0,0,0), ' + bandColor + ' 50%, rgba(0,0,0,0))';
+          back.appendChild(band);
+        }
         var fontPx = Math.max(8, Math.round(H * (it.size || 60) / 100));
         if (it.scroll) {
           var run = document.createElement('div');
@@ -360,6 +373,19 @@
         anim = raf(frame);
       }
       frame();
+    }
+
+    // ---------- 배경 (단색 또는 그라데이션) ----------
+    // 오래된 엔진을 위해 -webkit- 방식을 먼저 쓰고, 표준 방식으로 한 번 더 덮어 씀
+    function setBg(node, it) {
+      var base = it.bg || '#000';
+      node.style.background = base;
+      var g = it.grad;
+      if (!g || g === '없음' || !it.grad2) return;
+      var webDir = g === '세로' ? 'top' : (g === '대각선' ? 'left top' : 'left');
+      var stdDir = g === '세로' ? 'to bottom' : (g === '대각선' ? 'to bottom right' : 'to right');
+      node.style.background = '-webkit-linear-gradient(' + webDir + ', ' + base + ', ' + it.grad2 + ')';
+      node.style.background = 'linear-gradient(' + stdDir + ', ' + base + ', ' + it.grad2 + ')';
     }
 
     // ---------- 로고 ----------
