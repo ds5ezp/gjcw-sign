@@ -204,6 +204,12 @@
       var f;
       for (var i = 0; i < items.length; i++) {
         if (items[i].type === 'image' && items[i].file) need[items[i].file] = true;
+        // 항목에 붙은 로고 이미지도 미리 받음
+        if (items[i].logos) {
+          for (var k = 0; k < items[i].logos.length; k++) {
+            if (items[i].logos[k].file) need[items[i].logos[k].file] = true;
+          }
+        }
       }
       // 더 이상 쓰지 않는 이미지는 버림 (지금 보이는 것은 남김)
       for (f in images) {
@@ -325,6 +331,7 @@
           if (FX[it.effect]) startFx(span, it.effect, String(it.text));
         }
       }
+      addLogos(back, it);
       back.className = 'layer on';
       var old = layers[front];
       old.className = 'layer';
@@ -353,6 +360,28 @@
         anim = raf(frame);
       }
       frame();
+    }
+
+    // ---------- 로고 ----------
+    // 위치·크기는 화면 비율(%)로 저장되어 있어서, 이 화면 크기에 맞춰 계산해 그림
+    // role '배경'이면 문구 뒤에, '위'이면 맨 위에 올림. 투명도는 0~100
+    function addLogos(layer, it) {
+      if (!it.logos || !it.logos.length) return;
+      for (var i = 0; i < it.logos.length; i++) {
+        var lg = it.logos[i];
+        var entry = images[lg.file];
+        if (!entry || entry.state !== 'ready' || !entry.img) continue;
+        var img = new Image();
+        img.src = entry.img.src;
+        img.style.position = 'absolute';
+        img.style.left = (Number(lg.x) || 0) + '%';
+        img.style.top = (Number(lg.y) || 0) + '%';
+        img.style.height = Math.round(H * (Number(lg.size) || 20) / 100) + 'px';
+        img.style.width = 'auto';
+        img.style.opacity = (lg.opacity === undefined ? 100 : Number(lg.opacity)) / 100;
+        if (lg.role === '배경') layer.insertBefore(img, layer.firstChild);
+        else layer.appendChild(img);
+      }
     }
 
     function showNothing() {
