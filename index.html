@@ -76,6 +76,8 @@
     var pollTimer = null;
     var anim = null;
     var reloading = false;
+    var urgentSeen = {};     // 이미 한 번 본 긴급 안내 (ID 기준)
+    var urgentPending = null; // 바로 띄울 긴급 안내 ID
 
     var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame ||
       function (cb) { return setTimeout(cb, 16); };
@@ -179,8 +181,9 @@
           lastText = text;
           items = body.items || [];
           loadImages();
-          // 지금 보이는 콘텐츠가 지워졌거나 바뀌었으면 바로 다음으로
-          if (current && !findSame(current)) next();
+          markUrgent();
+          // 새 긴급 안내가 있거나, 지금 보이는 콘텐츠가 지워졌거나 바뀌었으면 바로 다음으로
+          if (urgentPending || (current && !findSame(current))) next();
         } else {
           loadImages();
         }
@@ -259,10 +262,34 @@
       return out;
     }
 
+    // 긴급 안내(ID가 URGENT_ 로 시작): 처음 보는 것이면 지금 보이는 것을 끊고 바로 띄움
+    function markUrgent() {
+      for (var i = 0; i < items.length; i++) {
+        var id = String(items[i].id || '');
+        if (id.indexOf('URGENT_') === 0 && !urgentSeen[id]) {
+          urgentSeen[id] = true;
+          urgentPending = id;
+        }
+      }
+    }
+
+    function findUrgent() {
+      var list = validItems();
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === urgentPending) return list[i];
+      }
+      return null;
+    }
+
     function next() {
       clearTimeout(timer);
       timer = null;
       checkReload();
+      if (urgentPending) {
+        var urgent = findUrgent();
+        urgentPending = null;
+        if (urgent) { show(urgent); return; }
+      }
       var list = validItems();
       if (!list.length) {
         // 보여줄 것이 없으면 검은 화면으로 두고 1초마다 다시 확인 (시작 시각이 된 콘텐츠 등)
